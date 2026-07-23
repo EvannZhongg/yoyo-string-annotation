@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Yoyo String Annotation"
+  short_description: "Build reviewed yoyo string labels without prelabel models"
+  default_prompt: "Use $agent-yoyo-string-annotation to sample, annotate, self-review, and export a yoyo string dataset."

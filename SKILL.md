@@ -1,5 +1,5 @@
 ---
-name: agent-yoyo-string-annotation
+name: yoyo-string-annotation
 description: Build high-quality yoyo string annotation collections by having a vision-capable agent directly inspect, annotate, repeatedly refine, self-review, audit, and export labels without detector, segmentation, pose, SAM, or other recognition-model prelabels. Use for dispersed video frame sampling, thin-string centerlines or masks, normal-versus-horizontal trick orientation, ordered hand-to-yoyo path continuity, adjacent-frame refinement, hard negatives, unresolved-case handling, and source-group-preserving annotation production before any later dataset split.
 ---
 

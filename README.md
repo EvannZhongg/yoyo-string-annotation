@@ -151,4 +151,5 @@ edge_clipped, small_yoyo, no_string, background_edge
 }
 ```
 
-权威字段定义见 `references/annotation-schema.md` 和 `references/data-contract.md`。
+<img width="1282" height="3566" alt="4355f46e9582de9cb010f98bf033a539" src="https://github.com/user-attachments/assets/448cbc80-9cf7-4ba3-9a58-0fdbd4539473" />
+

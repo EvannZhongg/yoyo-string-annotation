@@ -19,7 +19,8 @@ from typing import Any, Iterable
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
-SCHEMA_VERSION = "agent_yoyo_string_annotation_v2"
+SCHEMA_VERSION = "agent_yoyo_string_annotation_v3"
+SAMPLING_SCHEMA_VERSION = "agent_video_sampling_v1"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 STRING_VISIBILITY = {"visible", "partial", "not_visible", "uncertain"}
 YOYO_VISIBILITY = {"visible", "partially_visible", "occluded", "out_of_frame", "absent", "uncertain"}
@@ -95,6 +96,105 @@ def clean_id(value: str) -> str:
 def parse_frame_index(stem: str) -> int | None:
     match = re.search(r"(\d+)$", stem)
     return int(match.group(1)) if match else None
+
+
+def is_sha256(value: Any) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", str(value).strip().lower()))
+
+
+def resolve_sampling_manifest(images_root: Path, configured: str) -> Path:
+    if configured:
+        path = Path(configured).resolve()
+        if not path.is_file():
+            raise ValueError(f"sampling manifest does not exist: {path}")
+        return path
+    for candidate in (
+        images_root / "sampling_manifest.json",
+        images_root.parent / "sampling_manifest.json",
+        images_root.parent.parent / "sampling_manifest.json",
+    ):
+        resolved = candidate.resolve()
+        if resolved.is_file():
+            return resolved
+    raise ValueError(
+        "init requires sampling_manifest.json beside the images directory; "
+        "pass --sampling-manifest explicitly"
+    )
+
+
+def load_sampling_records(path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    manifest = read_json(path)
+    if manifest.get("schema_version") != SAMPLING_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported sampling manifest schema={manifest.get('schema_version')}; "
+            f"expected {SAMPLING_SCHEMA_VERSION}"
+        )
+    records = manifest.get("records")
+    if not isinstance(records, list) or not records:
+        raise ValueError("sampling manifest must contain non-empty records")
+    required = {
+        "source_video",
+        "source_video_sha256",
+        "source_group",
+        "sequence_id",
+        "role",
+        "anchor_frame_index",
+        "frame_index",
+        "timestamp_s",
+        "output_image",
+        "output_image_sha256",
+    }
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ValueError(f"sampling record {index} must be an object")
+        missing = sorted(required - set(record))
+        if missing:
+            raise ValueError(f"sampling record {index} is missing: {', '.join(missing)}")
+        if not is_sha256(record["source_video_sha256"]):
+            raise ValueError(f"sampling record {index} has invalid source_video_sha256")
+        if not is_sha256(record["output_image_sha256"]):
+            raise ValueError(f"sampling record {index} has invalid output_image_sha256")
+        for field in ("source_video", "source_group", "sequence_id", "output_image"):
+            if not str(record[field]).strip():
+                raise ValueError(f"sampling record {index} has empty {field}")
+        if record["role"] not in {"anchor", "temporal_context"}:
+            raise ValueError(f"sampling record {index} has invalid role={record['role']}")
+        try:
+            frame_index = int(record["frame_index"])
+            anchor_frame_index = int(record["anchor_frame_index"])
+            timestamp_s = float(record["timestamp_s"])
+            if frame_index < 0 or anchor_frame_index < 0 or not math.isfinite(timestamp_s) or timestamp_s < 0:
+                raise ValueError
+            if record["role"] == "anchor" and frame_index != anchor_frame_index:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError(f"sampling record {index} has invalid frame/timestamp provenance") from None
+    return manifest, records
+
+
+def match_sampling_record(image_path: Path, records: list[dict[str, Any]]) -> dict[str, Any]:
+    image_path = image_path.resolve()
+    image_digest = sha256_file(image_path)
+    path_matches = [
+        item for item in records if Path(str(item["output_image"])).resolve() == image_path
+    ]
+    candidates = path_matches or [
+        item
+        for item in records
+        if str(item["output_image_sha256"]).lower() == image_digest
+        and clean_id(str(item["source_group"])) == clean_id(image_path.parent.name)
+    ]
+    if len(candidates) != 1:
+        raise ValueError(
+            f"source image must match exactly one sampling record: {image_path} "
+            f"(matches={len(candidates)})"
+        )
+    record = candidates[0]
+    if str(record["output_image_sha256"]).lower() != image_digest:
+        raise ValueError(f"sampling record image hash does not match: {image_path}")
+    if clean_id(str(record["source_group"])) != clean_id(image_path.parent.name):
+        raise ValueError(f"sampling record source_group does not match image folder: {image_path}")
+    return record
 
 
 def image_info(path: Path) -> tuple[int, int]:
@@ -314,8 +414,14 @@ def label_files(root: Path) -> list[Path]:
     )
 
 
-def initial_label(image_path: Path, source_group: str, min_approvals: int) -> dict[str, Any]:
+def initial_label(
+    image_path: Path,
+    provenance: dict[str, Any],
+    min_approvals: int,
+    sampling_manifest_sha256: str,
+) -> dict[str, Any]:
     width, height = image_info(image_path)
+    source_group = clean_id(str(provenance["source_group"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": utc_now(),
@@ -323,10 +429,16 @@ def initial_label(image_path: Path, source_group: str, min_approvals: int) -> di
         "source_image": str(image_path.resolve()),
         "image_sha256": sha256_file(image_path),
         "image_size": [width, height],
+        "source_video": str(provenance["source_video"]),
+        "source_video_sha256": str(provenance["source_video_sha256"]).lower(),
         "source_group": source_group,
         "video_id": source_group,
-        "frame_index": parse_frame_index(image_path.stem),
-        "timestamp_s": None,
+        "frame_index": int(provenance["frame_index"]),
+        "timestamp_s": float(provenance["timestamp_s"]),
+        "sequence_id": str(provenance["sequence_id"]),
+        "sampling_role": str(provenance["role"]),
+        "anchor_frame_index": int(provenance["anchor_frame_index"]),
+        "sampling_manifest_sha256": sampling_manifest_sha256,
         "visibility": "uncertain",
         "yoyo_bbox_pixel": None,
         "yoyo_bbox_2d": None,
@@ -366,22 +478,41 @@ def initial_label(image_path: Path, source_group: str, min_approvals: int) -> di
 def command_init(args: argparse.Namespace) -> int:
     images_root = Path(args.images).resolve()
     output = Path(args.output).resolve()
+    sampling_manifest = resolve_sampling_manifest(images_root, args.sampling_manifest)
+    _, sampling_records = load_sampling_records(sampling_manifest)
+    sampling_manifest_sha256 = sha256_file(sampling_manifest)
     paths = [images_root] if images_root.is_file() else sorted(images_root.rglob("*"))
     paths = [path for path in paths if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
+    if not paths:
+        raise ValueError(f"no source images found: {images_root}")
     created = skipped = 0
+    source_groups: set[str] = set()
     for image_path in paths:
-        group = clean_id(args.source_group or image_path.parent.name or images_root.stem)
+        provenance = match_sampling_record(image_path, sampling_records)
+        group = clean_id(str(provenance["source_group"]))
+        source_groups.add(group)
         target = output / "labels" / group / f"{image_path.stem}.json"
         if target.exists() and not args.force:
             skipped += 1
             continue
-        write_json(target, initial_label(image_path, group, args.min_approvals))
+        write_json(
+            target,
+            initial_label(
+                image_path,
+                provenance,
+                args.min_approvals,
+                sampling_manifest_sha256,
+            ),
+        )
         created += 1
     manifest = {
-        "schema_version": "agent_yoyo_string_project_v1",
+        "schema_version": "agent_yoyo_string_project_v2",
         "created_at_utc": utc_now(),
         "images_root": str(images_root),
         "output": str(output),
+        "sampling_manifest": str(sampling_manifest),
+        "sampling_manifest_sha256": sampling_manifest_sha256,
+        "source_group_count": len(source_groups),
         "image_count": len(paths),
         "created": created,
         "skipped": skipped,
@@ -737,6 +868,42 @@ def validate_label(
 ) -> dict[str, list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
+    if label.get("schema_version") != SCHEMA_VERSION:
+        errors.append(
+            f"unsupported schema_version={label.get('schema_version')}; expected {SCHEMA_VERSION}"
+        )
+    for field in ("source_video", "source_group", "video_id", "sequence_id"):
+        if not str(label.get(field, "")).strip():
+            errors.append(f"{field} is required")
+    if label.get("video_id") != label.get("source_group"):
+        errors.append("video_id must equal source_group")
+    for field in ("source_video_sha256", "sampling_manifest_sha256", "image_sha256"):
+        if not is_sha256(label.get(field)):
+            errors.append(f"{field} must be a lowercase SHA-256 digest")
+    try:
+        frame_index = int(label.get("frame_index"))
+        if isinstance(label.get("frame_index"), bool) or frame_index < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        frame_index = -1
+        errors.append("frame_index must be a non-negative integer")
+    try:
+        timestamp_s = float(label.get("timestamp_s"))
+        if not math.isfinite(timestamp_s) or timestamp_s < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("timestamp_s must be a non-negative finite number")
+    role = str(label.get("sampling_role", ""))
+    if role not in {"anchor", "temporal_context"}:
+        errors.append("sampling_role must be anchor or temporal_context")
+    try:
+        anchor_frame_index = int(label.get("anchor_frame_index"))
+        if isinstance(label.get("anchor_frame_index"), bool) or anchor_frame_index < 0:
+            raise ValueError
+        if role == "anchor" and frame_index != anchor_frame_index:
+            errors.append("anchor sampling record must use frame_index=anchor_frame_index")
+    except (TypeError, ValueError):
+        errors.append("anchor_frame_index must be a non-negative integer")
     try:
         width, height = [int(item) for item in label.get("image_size", [])]
         if width <= 0 or height <= 0:
@@ -1295,6 +1462,8 @@ def audit_collection(
     paths = label_files(root)
     records = []
     hash_groups: dict[str, set[str]] = defaultdict(set)
+    source_identities: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    video_hash_groups: dict[str, set[str]] = defaultdict(set)
     source_groups: set[str] = set()
     counts = Counter()
     for path in paths:
@@ -1312,6 +1481,11 @@ def audit_collection(
         group = str(label.get("source_group", ""))
         digest = str(label.get("image_sha256", ""))
         source_groups.add(group)
+        video_hash = str(label.get("source_video_sha256", "")).lower()
+        source_video = str(label.get("source_video", ""))
+        if group and video_hash and source_video:
+            source_identities[group].add((video_hash, source_video))
+            video_hash_groups[video_hash].add(group)
         if digest:
             hash_groups[digest].add(group)
         counts["labels"] += 1
@@ -1332,8 +1506,29 @@ def audit_collection(
             collection_errors.append(
                 {"kind": "duplicate_image_source_group_conflict", "image_sha256": digest, "source_groups": sorted(groups)}
             )
+    for group, identities in source_identities.items():
+        if len(identities) > 1:
+            collection_errors.append(
+                {
+                    "kind": "source_group_video_identity_conflict",
+                    "source_group": group,
+                    "video_identities": [
+                        {"source_video_sha256": digest, "source_video": source_video}
+                        for digest, source_video in sorted(identities)
+                    ],
+                }
+            )
+    for video_hash, groups in video_hash_groups.items():
+        if len(groups) > 1:
+            collection_errors.append(
+                {
+                    "kind": "source_video_hash_group_conflict",
+                    "source_video_sha256": video_hash,
+                    "source_groups": sorted(groups),
+                }
+            )
     return {
-        "schema_version": "agent_yoyo_string_audit_v2",
+        "schema_version": "agent_yoyo_string_audit_v3",
         "created_at_utc": utc_now(),
         "root": str(root.resolve()),
         "ok": counts["labels_with_errors"] == 0 and not collection_errors,
@@ -1370,6 +1565,7 @@ def command_export(args: argparse.Namespace) -> int:
         raise ValueError("collection leakage prevents export: " + json.dumps(audit["collection_errors"], ensure_ascii=False))
     exported = []
     excluded = []
+    exported_sources: dict[str, dict[str, Any]] = {}
     for path in label_files(source_root):
         label = read_json(path)
         reasons = list(record_by_path.get(str(path), {}).get("errors") or [])
@@ -1416,13 +1612,29 @@ def command_export(args: argparse.Namespace) -> int:
                 "image": str(image_target),
                 "visualization": str(visualization_target),
                 "visualization_sha256": sha256_file(visualization_target),
+                "source_video": label["source_video"],
+                "source_video_sha256": label["source_video_sha256"],
+                "source_group": label["source_group"],
+                "video_id": label["video_id"],
+                "frame_index": label["frame_index"],
+                "timestamp_s": label["timestamp_s"],
+                "sequence_id": label["sequence_id"],
+                "sampling_role": label["sampling_role"],
+                "anchor_frame_index": label["anchor_frame_index"],
+                "image_sha256": label["image_sha256"],
                 "visibility": label.get("string_visibility"),
                 "trick_orientation": label.get("trick_orientation"),
                 "variation_tags": label.get("variation_tags") or [],
             }
         )
+        exported_sources[group] = {
+            "source_group": group,
+            "video_id": label["video_id"],
+            "source_video": label["source_video"],
+            "source_video_sha256": label["source_video_sha256"],
+        }
     manifest = {
-        "schema_version": "agent_yoyo_string_export_v2",
+        "schema_version": "agent_yoyo_string_export_v3",
         "created_at_utc": utc_now(),
         "source": str(source_root),
         "output": str(output),
@@ -1430,6 +1642,8 @@ def command_export(args: argparse.Namespace) -> int:
         "excluded_count": len(excluded),
         "counts": dict(Counter(str(item["visibility"]) for item in exported)),
         "trick_orientation_counts": dict(Counter(str(item["trick_orientation"]) for item in exported)),
+        "source_count": len(exported_sources),
+        "sources": [exported_sources[group] for group in sorted(exported_sources)],
         "exported": exported,
         "excluded": excluded,
         "label_semantics": {
@@ -1492,10 +1706,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init = subparsers.add_parser("init", help="Create draft labels for an image collection.")
+    init = subparsers.add_parser(
+        "init",
+        help="Create provenance-bound draft labels from a sampled video frame collection.",
+    )
     init.add_argument("--images", required=True)
     init.add_argument("--output", required=True)
-    init.add_argument("--source-group", default="")
+    init.add_argument(
+        "--sampling-manifest",
+        default="",
+        help="agent_video_sampling_v1 manifest; auto-detected beside the images directory",
+    )
     init.add_argument("--min-approvals", type=int, default=2)
     init.add_argument("--force", action="store_true")
     init.set_defaults(func=command_init)

@@ -47,9 +47,11 @@ python "$SKILL_DIR/scripts/sample_video_frames.py" \
 ```
 
 Inspect `anchor_contact_sheet.jpg` and the raw extracted frames. Preserve each
-video identity in `source_group`. Retain anchors spanning different times and
-visible formations; use nearby context frames for continuity, not as substitutes
-for scene diversity.
+video identity in `source_group`. Keep `sampling_manifest.json`; it is the
+script-authoritative mapping from every extracted image to its source video,
+video SHA-256, frame index, and timestamp. Retain anchors spanning different
+times and visible formations; use nearby context frames for continuity, not as
+substitutes for scene diversity.
 
 Initialize the annotation project:
 
@@ -57,6 +59,11 @@ Initialize the annotation project:
 python "$SKILL_DIR/scripts/annotation_pipeline.py" init \
   --images PROJECT/images --output PROJECT --min-approvals 2
 ```
+
+`init` auto-discovers `PROJECT/sampling_manifest.json`; pass
+`--sampling-manifest PATH` when it is elsewhere. Initialization must fail when
+an image has no unique manifest record or its hash/source group differs. The
+pipeline copies provenance into every label.
 
 Do not assign `train`, `val`, or `test` here. Keep all frames from a source video
 under the same `source_group`; a downstream dataset-building step may later
@@ -150,9 +157,9 @@ python "$SKILL_DIR/scripts/annotation_pipeline.py" export \
 Export creates a portable snapshot containing copied original frames, reviewed
 label JSON, terminal annotation overlays, and a manifest. Each label references
 its matching visualization under `visualizations/<source_group>/`, and the
-manifest records the overlay SHA-256. Inspect excluded counts, source identity,
-visibility coverage, and variation tags before handing the collection to a
-separate dataset-partitioning step.
+manifest records the overlay SHA-256 plus per-frame and per-video provenance.
+Inspect excluded counts, source identity, visibility coverage, and variation
+tags before handing the collection to a separate dataset-partitioning step.
 
 If rendering rules change after export, refresh the terminal overlays and
 manifest digests without changing labels or source frames:

@@ -1,5 +1,13 @@
 # Annotation Schema
 
+## Script-owned provenance
+
+Every label uses schema `agent_yoyo_string_annotation_v3` and carries
+`source_video`, `source_video_sha256`, `source_group`, `video_id`, `frame_index`,
+`timestamp_s`, `sequence_id`, `sampling_role`, `anchor_frame_index`, and
+`sampling_manifest_sha256`. `annotation_pipeline.py init` copies these fields
+from the sampling manifest.
+
 ## Coordinates and visible geometry
 
 Use original image pixels as `[x,y]` from the upper-left. Add points at bends,

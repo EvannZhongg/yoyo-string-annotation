@@ -19,7 +19,8 @@ process.
 
 The descriptor cannot identify a yoyo, hand, string, or pose. The manifest
 records `recognition_model_used=false`, parameters, source hashes, timestamps,
-and anchor/context roles.
+and anchor/context roles. This manifest is required by annotation project
+initialization and remains the authority for video provenance.
 
 ## Agent coverage pass
 

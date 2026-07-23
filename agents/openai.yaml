@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Yoyo String Annotation"
   short_description: "Build reviewed yoyo string and trick-plane labels"
-  default_prompt: "Use $agent-yoyo-string-annotation to produce reviewed yoyo string annotations with normal-versus-horizontal trick orientation."
+  default_prompt: "Use $yoyo-string-annotation to produce provenance-bound, reviewed yoyo string annotations with normal-versus-horizontal trick orientation."

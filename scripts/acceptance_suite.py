@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -20,6 +21,19 @@ WIDTH, HEIGHT = 640, 360
 HAND_LEFT = [88, 74]
 HAND_RIGHT = [552, 74]
 YOYO_BOX = [294, 268, 346, 320]
+
+
+def synthetic_provenance(source_group: str, frame_index: int) -> dict[str, Any]:
+    return {
+        "source_video": str(Path("source-videos") / f"{source_group}.mp4"),
+        "source_video_sha256": hashlib.sha256(source_group.encode("utf-8")).hexdigest(),
+        "source_group": source_group,
+        "sequence_id": f"seq-001-anchor-{frame_index:08d}",
+        "role": "anchor",
+        "anchor_frame_index": frame_index,
+        "frame_index": frame_index,
+        "timestamp_s": frame_index / 10.0,
+    }
 
 
 def endpoint_anchor(point: list[float]) -> str:
@@ -224,7 +238,15 @@ def main() -> int:
         image.save(image_path)
         raw_paths.append(image_path)
         label_path = output / "labels" / source_group / f"frame_{index:04d}.json"
-        pipeline.write_json(label_path, pipeline.initial_label(image_path, source_group, 2))
+        pipeline.write_json(
+            label_path,
+            pipeline.initial_label(
+                image_path,
+                synthetic_provenance(source_group, index),
+                2,
+                hashlib.sha256(b"synthetic-acceptance-manifest").hexdigest(),
+            ),
+        )
         labels[case_id] = label_path
 
         if case.get("unresolved"):

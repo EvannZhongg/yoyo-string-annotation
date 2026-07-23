@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +18,60 @@ from PIL import Image, ImageDraw
 
 SCRIPT = Path(__file__).with_name("annotation_pipeline.py")
 SAMPLER = Path(__file__).with_name("sample_video_frames.py")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def write_sampling_manifest(images_root: Path, output: Path) -> Path:
+    records = []
+    sources = {}
+    for image_path in sorted(path for path in images_root.rglob("*") if path.is_file()):
+        source_group = image_path.parent.name
+        frame_match = re.search(r"(\d+)$", image_path.stem)
+        frame_index = int(frame_match.group(1)) if frame_match else 0
+        source_video = str((output.parent / "source-videos" / f"{source_group}.mp4").resolve())
+        source_video_sha256 = hashlib.sha256(source_group.encode("utf-8")).hexdigest()
+        sources[source_group] = {
+            "source_video": source_video,
+            "source_video_sha256": source_video_sha256,
+            "source_group": source_group,
+            "fps": 10.0,
+            "frame_count": max(frame_index + 1, 2),
+            "image_size": list(Image.open(image_path).size),
+            "candidate_count": 1,
+            "anchor_count": 1,
+            "written_count": 1,
+        }
+        records.append(
+            {
+                "source_video": source_video,
+                "source_video_sha256": source_video_sha256,
+                "source_group": source_group,
+                "sequence_id": f"seq-001-anchor-{frame_index:08d}",
+                "role": "anchor",
+                "anchor_frame_index": frame_index,
+                "frame_index": frame_index,
+                "timestamp_s": frame_index / 10.0,
+                "image_size": list(Image.open(image_path).size),
+                "output_image": str(image_path.resolve()),
+                "output_image_sha256": file_sha256(image_path),
+            }
+        )
+    payload = {
+        "schema_version": "agent_video_sampling_v1",
+        "source_count": len(sources),
+        "record_count": len(records),
+        "failure_count": 0,
+        "sources": list(sources.values()),
+        "records": records,
+        "failures": [],
+    }
+    output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return output
 
 
 def run(*args: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
@@ -58,7 +114,16 @@ def main() -> int:
         image.save(first)
 
         project = root / "project"
-        run("init", "--images", str(images), "--output", str(project))
+        sampling_manifest_path = write_sampling_manifest(images, root / "sampling_manifest.json")
+        run(
+            "init",
+            "--images",
+            str(images),
+            "--output",
+            str(project),
+            "--sampling-manifest",
+            str(sampling_manifest_path),
+        )
         label = project / "labels" / "video-a" / "frame_0001.json"
         candidate = root / "candidate.json"
         candidate.write_text(
@@ -183,6 +248,12 @@ def main() -> int:
         assert Path(exported_item["visualization"]).is_file()
         assert exported_item["visualization_sha256"]
         assert exported_item["trick_orientation"] == "normal"
+        assert exported_item["source_group"] == "video-a"
+        assert exported_item["video_id"] == "video-a"
+        assert exported_item["frame_index"] == 1
+        assert exported_item["timestamp_s"] == 0.1
+        assert exported_item["source_video_sha256"]
+        assert manifest["source_count"] == 1
         assert manifest["trick_orientation_counts"] == {"normal": 1}
         run("audit", "--labels", str(export / "labels"), "--require-approved", "--strict")
         portable_path = next((export / "labels" / "video-a").rglob("*.json"))
@@ -190,6 +261,8 @@ def main() -> int:
         assert "split" not in portable_label
         assert not Path(portable_label["source_image"]).is_absolute()
         assert not Path(portable_label["visualization"]).is_absolute()
+        assert portable_label["source_video"] == exported_item["source_video"]
+        assert portable_label["source_video_sha256"] == exported_item["source_video_sha256"]
         run("refresh-visualizations", "--export", str(export))
         refreshed_manifest = json.loads((export / "manifest.json").read_text(encoding="utf-8"))
         assert refreshed_manifest["visualizations_refreshed_at_utc"]
@@ -319,7 +392,16 @@ def main() -> int:
         v_draw.line([(100, 80), (320, 285), (540, 80)], fill="#DDF45A", width=8, joint="curve")
         v_frame.save(v_image)
         v_project = root / "v-project"
-        run("init", "--images", str(v_images), "--output", str(v_project))
+        v_manifest = write_sampling_manifest(v_images, root / "v-sampling-manifest.json")
+        run(
+            "init",
+            "--images",
+            str(v_images),
+            "--output",
+            str(v_project),
+            "--sampling-manifest",
+            str(v_manifest),
+        )
         v_label = v_project / "labels" / "video-v" / "frame_0001.json"
         v_polygon = [[96, 75], [320, 279], [544, 75], [549, 84], [320, 291], [91, 84]]
         v_candidate = root / "v-candidate.json"
@@ -405,7 +487,16 @@ def main() -> int:
             )
             frame.save(sequence / f"frame_{frame_number:04d}.png")
         temporal_project = root / "temporal-project"
-        run("init", "--images", str(sequence), "--output", str(temporal_project))
+        temporal_manifest = write_sampling_manifest(sequence, root / "temporal-sampling-manifest.json")
+        run(
+            "init",
+            "--images",
+            str(sequence),
+            "--output",
+            str(temporal_project),
+            "--sampling-manifest",
+            str(temporal_manifest),
+        )
         previous_label = temporal_project / "labels" / "sequence" / "frame_0001.json"
         target_label = temporal_project / "labels" / "sequence" / "frame_0002.json"
         run(
@@ -474,6 +565,30 @@ def main() -> int:
         assert len({item["sequence_id"] for item in anchors}) == 4
         assert max(item["frame_index"] for item in anchors) - min(item["frame_index"] for item in anchors) > 20
         assert (sampling_output / "anchor_contact_sheet.jpg").is_file()
+        sampled_project = root / "sampled-project"
+        run("init", "--images", str(sampling_output / "images"), "--output", str(sampled_project))
+        sampled_labels = sorted((sampled_project / "labels").rglob("*.json"))
+        assert len(sampled_labels) == sampling_manifest["record_count"]
+        sampled_label = json.loads(sampled_labels[0].read_text(encoding="utf-8"))
+        sampled_record = next(
+            item
+            for item in sampling_manifest["records"]
+            if item["output_image_sha256"] == sampled_label["image_sha256"]
+        )
+        for field in ("source_video", "source_video_sha256", "source_group", "frame_index", "timestamp_s"):
+            assert sampled_label[field] == sampled_record[field]
+        tampered_image = Path(sampling_manifest["records"][0]["output_image"])
+        with tampered_image.open("ab") as handle:
+            handle.write(b"tampered-after-sampling")
+        tampered_init = run(
+            "init",
+            "--images",
+            str(sampling_output / "images"),
+            "--output",
+            str(root / "tampered-project"),
+            expected=2,
+        )
+        assert "sampling record image hash does not match" in tampered_init.stderr
 
     print("agent yoyo string annotation self-test passed")
     return 0

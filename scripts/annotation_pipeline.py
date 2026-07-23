@@ -1333,7 +1333,7 @@ def audit_collection(
                 {"kind": "duplicate_image_source_group_conflict", "image_sha256": digest, "source_groups": sorted(groups)}
             )
     return {
-        "schema_version": "agent_yoyo_string_audit_v1",
+        "schema_version": "agent_yoyo_string_audit_v2",
         "created_at_utc": utc_now(),
         "root": str(root.resolve()),
         "ok": counts["labels_with_errors"] == 0 and not collection_errors,
@@ -1422,7 +1422,7 @@ def command_export(args: argparse.Namespace) -> int:
             }
         )
     manifest = {
-        "schema_version": "agent_yoyo_string_export_v1",
+        "schema_version": "agent_yoyo_string_export_v2",
         "created_at_utc": utc_now(),
         "source": str(source_root),
         "output": str(output),

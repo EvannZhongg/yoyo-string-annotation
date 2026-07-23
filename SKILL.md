@@ -177,6 +177,6 @@ python "$SKILL_DIR/scripts/acceptance_suite.py" --output EMPTY_ACCEPTANCE_DIR
 ```
 
 Require at least ten terminal cases, zero pending/failed cases, a passing
-collection audit, and exactly documented exclusions for unresolved scenes.
-Read `references/acceptance-results.md` for the latest checked 15-scenario
-baseline, fixes discovered during acceptance, and its limits.
+collection audit, and exactly documented exclusions for unresolved scenes. Keep
+run-specific dates, counts, findings, and reports with the generated project,
+not in the skill Markdown.
